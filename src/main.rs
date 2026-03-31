@@ -1,6 +1,9 @@
 mod http;
 
-use std::net::{TcpListener, TcpStream};
+use std::{
+    net::{TcpListener, TcpStream},
+    time::Duration,
+};
 
 use http::parse_request;
 
@@ -17,6 +20,7 @@ fn main() -> std::io::Result<()> {
 
     for stream in listener.incoming() {
         let stream = stream?;
+        stream.set_read_timeout(Some(Duration::new(30, 0)))?;
 
         std::thread::spawn(move || {
             if let Err(e) = handle_connection(stream) {

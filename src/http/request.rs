@@ -2,6 +2,7 @@ use std::io::Read;
 
 use super::Headers;
 
+#[derive(PartialEq, Debug)]
 pub enum Verb {
     Options,
     Head,
@@ -95,4 +96,28 @@ pub fn parse_request<'a, R: Read>(
         stream: reader,
     };
     Ok(request)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn it_works() {
+        let mut req = b"GET somefile.php HTTP1.1\r\nAuthorisation: bearer test\r\nAccept: application/xml\r\nContent-Length: 0\r\n\r\n".as_ref();
+        let mut headers_buf = Vec::new();
+        let mut body_rest = Vec::new();
+
+        let req = parse_request(&mut req, &mut headers_buf, &mut body_rest).unwrap();
+
+        assert_eq!(req.verb, Verb::Get);
+        assert_eq!(req.path, "somefile.php");
+        assert_eq!(req.body_size, 0);
+
+        let auth_header = req.headers.get("authorisation").unwrap();
+        assert_eq!(auth_header, "bearer test");
+
+        let accept_header = req.headers.get("Accept").unwrap();
+        assert_eq!(accept_header, "application/xml");
+    }
 }
