@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::{collections::HashMap, io::Read};
 
 use super::Headers;
 
@@ -20,6 +20,7 @@ pub struct Request<'a, R: Read> {
     pub verb: Verb,
     pub path: &'a str,
     pub headers: Headers<'a>,
+    pub query_params: HashMap<&'a str, &'a str>,
     pub body_size: usize,
     pub stream: R,
 }
@@ -47,6 +48,58 @@ fn make_headers_lowrcase(req: &mut [u8]) {
 
         index += 1;
     }
+}
+
+fn process_query_params(req: &mut Vec<u8>) -> Vec<((usize, usize), (usize, usize))> {
+    let mut index_read = 0;
+    let mut index_write = 0;
+    let mut questionmark_found = false;
+    let mut last_emp_pos = 0;
+    let mut last_eq_pos = 0;
+    let mut kv_store: Vec<((usize, usize), (usize, usize))> = Vec::new();
+
+    while index_read < req.len() {
+        let mut char = req[index_read];
+
+        if char == b'?' && !questionmark_found {
+            questionmark_found = true;
+            last_emp_pos = index_read;
+        }
+
+        if questionmark_found {
+            if char == b' ' {
+                let key = (last_emp_pos + 1, last_eq_pos);
+                let val = (last_eq_pos + 1, index_write);
+                kv_store.push((key, val));
+                break;
+            } else if char == b'%'
+                && index_read + 2 < req.len()
+                && let Ok(radix) = str::from_utf8(req[index_read + 1..index_read + 3].as_ref())
+                && let Ok(parsed_char) = u8::from_str_radix(radix, 16)
+            {
+                char = parsed_char;
+                index_read += 2;
+            } else if char == b'=' {
+                last_eq_pos = index_write;
+            } else if char == b'&' {
+                let key = (last_emp_pos + 1, last_eq_pos);
+                let val = (last_eq_pos + 1, index_write);
+                kv_store.push((key, val));
+                last_emp_pos = index_write;
+            }
+        }
+
+        req[index_write] = char;
+
+        index_read += 1;
+        index_write += 1;
+    }
+
+    if index_write < index_read {
+        req.drain(index_write..index_read);
+    }
+
+    kv_store
 }
 
 pub fn parse_request<'a, R: Read>(
@@ -78,6 +131,8 @@ pub fn parse_request<'a, R: Read>(
 
     make_headers_lowrcase(headers_buf);
 
+    let query_params = process_query_params(headers_buf);
+
     let headers_buf = std::str::from_utf8(headers_buf)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
@@ -86,7 +141,7 @@ pub fn parse_request<'a, R: Read>(
     let first_line = lines.next().unwrap();
     let mut first_line = first_line.split(" ");
     let verb = first_line.next().unwrap();
-    let path = first_line.next().unwrap();
+    let path = first_line.next().unwrap().split_once('?').unwrap().0;
 
     let verb = match verb {
         "OPTIONS" => Verb::Options,
@@ -115,10 +170,21 @@ pub fn parse_request<'a, R: Read>(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
         .unwrap_or(0);
 
+    let query_params = query_params
+        .iter()
+        .map(|(key, val)| {
+            (
+                headers_buf[key.0..key.1].as_ref(),
+                headers_buf[val.0..val.1].as_ref(),
+            )
+        })
+        .collect::<HashMap<&'a str, &'a str>>();
+
     let request = Request {
         verb,
         path,
         headers,
+        query_params,
         body_size,
         stream: reader,
     };
@@ -131,7 +197,7 @@ mod tests {
 
     #[test]
     fn it_works() {
-        let mut req = b"GET somefile.php HTTP1.1\r\nAuthorisation: bearer test\r\nAccept: application/xml\r\nContent-Length: 0\r\n\r\n".as_ref();
+        let mut req = b"GET somefile.php?key=%20val&key2=%26%3Dval HTTP1.1\r\nAuthorisation: bearer test\r\nAccept: application/xml\r\nContent-Length: 0\r\n\r\n".as_ref();
         let mut headers_buf = Vec::new();
         let mut body_rest = Vec::new();
 
@@ -146,6 +212,9 @@ mod tests {
 
         let accept_header = req.headers.get("Accept").unwrap();
         assert_eq!(accept_header, "application/xml");
+
+        assert_eq!(req.query_params.get("key"), Some(&" val"));
+        assert_eq!(req.query_params.get("key2"), Some(&"&=val"));
     }
 
     #[test]
@@ -156,5 +225,38 @@ mod tests {
         make_headers_lowrcase(&mut req);
 
         assert_eq!(expectation, &req[..]);
+    }
+
+    #[test]
+    fn test_process_query_params() {
+        //                         0123456789012345678901234567890123456789012345
+        // after decode:          "GET somefile.php?key= val&key1=val&key2=&=val HTTP1.1\r\n..."
+        //                                          ^  ^    ^   ^   ^   ^
+        //                                          17 21   26  30  34  39
+        let mut req = Vec::from(
+            b"GET somefile.php?key=%20val&key1=val&key2=%26%3Dval HTTP1.1\r\nAuthorisation: bearer:TEST",
+        );
+
+        let kv_indices = process_query_params(&mut req);
+
+        assert_eq!(
+            str::from_utf8(&req).unwrap(),
+            "GET somefile.php?key= val&key1=val&key2=&=val HTTP1.1\r\nAuthorisation: bearer:TEST"
+        );
+
+        // key= val
+        assert_eq!(kv_indices[0], ((17, 20), (21, 25)));
+        assert_eq!(&req[17..20], b"key");
+        assert_eq!(&req[21..25], b" val");
+
+        // key1=val
+        assert_eq!(kv_indices[1], ((26, 30), (31, 34)));
+        assert_eq!(&req[26..30], b"key1");
+        assert_eq!(&req[31..34], b"val");
+
+        // key2=&=val
+        assert_eq!(kv_indices[2], ((35, 39), (40, 45)));
+        assert_eq!(&req[35..39], b"key2");
+        assert_eq!(&req[40..45], b"&=val");
     }
 }
