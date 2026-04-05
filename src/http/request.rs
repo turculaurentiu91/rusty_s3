@@ -24,6 +24,31 @@ pub struct Request<'a, R: Read> {
     pub stream: R,
 }
 
+fn make_headers_lowrcase(req: &mut [u8]) {
+    let mut line_start = 0;
+    let mut index = 0;
+    let mut processed_line = false;
+    while index < req.len() {
+        if index == 0 {
+            index += 1;
+            continue;
+        }
+
+        let byte = req[index];
+        if byte == b'\n' && req[index - 1] == b'\r' {
+            line_start = index + 1;
+            processed_line = false;
+        }
+
+        if byte == b':' && line_start != 0 && !processed_line {
+            req[line_start..index].make_ascii_lowercase();
+            processed_line = true;
+        }
+
+        index += 1;
+    }
+}
+
 pub fn parse_request<'a, R: Read>(
     reader: &'a mut R,
     headers_buf: &'a mut Vec<u8>,
@@ -50,6 +75,8 @@ pub fn parse_request<'a, R: Read>(
             break;
         }
     }
+
+    make_headers_lowrcase(headers_buf);
 
     let headers_buf = std::str::from_utf8(headers_buf)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -119,5 +146,15 @@ mod tests {
 
         let accept_header = req.headers.get("Accept").unwrap();
         assert_eq!(accept_header, "application/xml");
+    }
+
+    #[test]
+    fn test_make_headers_lowercase() {
+        let expectation = b"GET somefile.php HTTP1.1\r\nauthorisation: bearer:TEST\r\naccept: application/xml\r\ncontent-length: 0".as_ref();
+        let mut req = Vec::from(b"GET somefile.php HTTP1.1\r\nAuthorisation: bearer:TEST\r\nAccept: application/xml\r\nContent-Length: 0");
+
+        make_headers_lowrcase(&mut req);
+
+        assert_eq!(expectation, &req[..]);
     }
 }
