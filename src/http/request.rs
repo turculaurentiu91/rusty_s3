@@ -1,5 +1,5 @@
 use std::{collections::HashMap, io::Read};
-
+use std::io::Chain;
 use super::Headers;
 
 #[derive(PartialEq, Debug)]
@@ -22,10 +22,10 @@ pub struct Request<'a, R: Read> {
     pub headers: Headers<'a>,
     pub query_params: HashMap<&'a str, &'a str>,
     pub body_size: usize,
-    pub stream: R,
+    pub stream: Chain<&'a [u8], R>,
 }
 
-fn make_headers_lowrcase(req: &mut [u8]) {
+fn make_headers_lowercase(req: &mut [u8]) {
     let mut line_start = 0;
     let mut index = 0;
     let mut processed_line = false;
@@ -129,7 +129,7 @@ pub fn parse_request<'a, R: Read>(
         }
     }
 
-    make_headers_lowrcase(headers_buf);
+    make_headers_lowercase(headers_buf);
 
     let query_params = process_query_params(headers_buf);
 
@@ -141,7 +141,8 @@ pub fn parse_request<'a, R: Read>(
     let first_line = lines.next().unwrap();
     let mut first_line = first_line.split(" ");
     let verb = first_line.next().unwrap();
-    let path = first_line.next().unwrap().split_once('?').unwrap().0;
+    let path = first_line.next().unwrap();
+    let path = path.split_once('?').unwrap_or((path, "")).0;
 
     let verb = match verb {
         "OPTIONS" => Verb::Options,
@@ -180,13 +181,15 @@ pub fn parse_request<'a, R: Read>(
         })
         .collect::<HashMap<&'a str, &'a str>>();
 
+    let stream = body_start.as_slice().chain(reader);
+
     let request = Request {
         verb,
         path,
         headers,
         query_params,
         body_size,
-        stream: reader,
+        stream,
     };
     Ok(request)
 }
@@ -197,6 +200,25 @@ mod tests {
 
     #[test]
     fn it_works() {
+        let mut req = b"GET somefile.php HTTP1.1\r\nAuthorisation: bearer test\r\nAccept: application/xml\r\nContent-Length: 0\r\n\r\n".as_ref();
+        let mut headers_buf = Vec::new();
+        let mut body_rest = Vec::new();
+
+        let req = parse_request(&mut req, &mut headers_buf, &mut body_rest).unwrap();
+
+        assert_eq!(req.verb, Verb::Get);
+        assert_eq!(req.path, "somefile.php");
+        assert_eq!(req.body_size, 0);
+
+        let auth_header = req.headers.get("authorisation").unwrap();
+        assert_eq!(auth_header, "bearer test");
+
+        let accept_header = req.headers.get("Accept").unwrap();
+        assert_eq!(accept_header, "application/xml");
+    }
+
+    #[test]
+    fn it_works_with_query_params() {
         let mut req = b"GET somefile.php?key=%20val&key2=%26%3Dval HTTP1.1\r\nAuthorisation: bearer test\r\nAccept: application/xml\r\nContent-Length: 0\r\n\r\n".as_ref();
         let mut headers_buf = Vec::new();
         let mut body_rest = Vec::new();
@@ -218,11 +240,32 @@ mod tests {
     }
 
     #[test]
+    fn test_body_read() {
+        use std::io::Read;
+
+        let mut req =
+            b"POST /upload?test=test HTTP1.1\r\nContent-Length: 11\r\n\r\nhello world".as_ref();
+        let mut headers_buf = Vec::new();
+        let mut body_rest = Vec::new();
+
+        let mut req = parse_request(&mut req, &mut headers_buf, &mut body_rest).unwrap();
+
+        assert_eq!(req.verb, Verb::Post);
+        assert_eq!(req.body_size, 11);
+
+        // The body bytes were pre-read into body_rest during header parsing.
+        // Reading from req.stream (the Chain) should yield them transparently.
+        let mut body = Vec::new();
+        req.stream.read_to_end(&mut body).unwrap();
+        assert_eq!(&body, b"hello world");
+    }
+
+    #[test]
     fn test_make_headers_lowercase() {
         let expectation = b"GET somefile.php HTTP1.1\r\nauthorisation: bearer:TEST\r\naccept: application/xml\r\ncontent-length: 0".as_ref();
         let mut req = Vec::from(b"GET somefile.php HTTP1.1\r\nAuthorisation: bearer:TEST\r\nAccept: application/xml\r\nContent-Length: 0");
 
-        make_headers_lowrcase(&mut req);
+        make_headers_lowercase(&mut req);
 
         assert_eq!(expectation, &req[..]);
     }
