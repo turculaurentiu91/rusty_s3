@@ -2,7 +2,7 @@ use std::{collections::HashMap, io::Read};
 use std::io::Chain;
 use super::Headers;
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone, Copy)]
 pub enum Verb {
     Options,
     Head,
