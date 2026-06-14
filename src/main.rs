@@ -2,6 +2,7 @@ mod http;
 
 use http::{Verb, parse_request};
 use std::io::Error;
+use std::os::fd::AsRawFd;
 use std::{
     net::{TcpListener, TcpStream},
     time::Duration,
@@ -26,16 +27,16 @@ fn handle_connection(mut stream: TcpStream) -> std::io::Result<()> {
         });
 
     match (request.verb, path_segments.0, path_segments.1) {
-        (Verb::Get, None, None) => {} // list buckets
-        (Verb::Get, Some(bucket), None) => {} // list bucket
-        (Verb::Put, Some(bucket), None) => {} // create bucket
+        (Verb::Get, None, None) => {}            // list buckets
+        (Verb::Get, Some(bucket), None) => {}    // list bucket
+        (Verb::Put, Some(bucket), None) => {}    // create bucket
         (Verb::Delete, Some(bucket), None) => {} // delete bucket
 
         (Verb::Get, Some(bucket), Some(path)) => {} // read object
         (Verb::Put, Some(bucket), Some(path)) => {} // upload object
         (Verb::Delete, Some(bucket), Some(path)) => {} // delete object
 
-        _ => panic!("unsupported verb")
+        _ => panic!("unsupported verb"),
     }
 
     Ok(())
@@ -43,16 +44,60 @@ fn handle_connection(mut stream: TcpStream) -> std::io::Result<()> {
 
 fn main() -> std::io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:9100")?;
+    listener.set_nonblocking(true)?;
+    let listener_fd = listener.as_raw_fd();
+    let epoll_fd = unsafe { libc::epoll_create1(0) };
+    if epoll_fd == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
 
-    for stream in listener.incoming() {
-        let stream = stream?;
-        stream.set_read_timeout(Some(Duration::new(30, 0)))?;
+    let mut conn_ready_ev = libc::epoll_event {
+        events: (libc::EPOLLIN) as u32,
+        u64: 100,
+    };
 
-        std::thread::spawn(move || {
-            if let Err(e) = handle_connection(stream) {
-                eprintln!("Connection error: {e}");
+    unsafe {
+        libc::epoll_ctl(
+            epoll_fd,
+            libc::EPOLL_CTL_ADD,
+            listener_fd,
+            &mut conn_ready_ev,
+        )
+    };
+    let mut events: Vec<libc::epoll_event> = Vec::with_capacity(1024);
+
+    loop {
+        events.clear();
+        let res = unsafe {
+            libc::epoll_wait(
+                epoll_fd,
+                events.as_mut_ptr() as *mut libc::epoll_event,
+                1024,
+                -1,
+            )
+        };
+
+        if res == -1 {
+            break;
+        }
+
+        unsafe { events.set_len(res as usize) };
+
+        for event in &events {
+            match (event.u64) {
+                100 => {
+                    let (stream, _) = listener.accept()?;
+                    stream.set_read_timeout(Some(Duration::new(30, 0)))?;
+
+                    std::thread::spawn(move || {
+                        if let Err(e) = handle_connection(stream) {
+                            eprintln!("Connection error: {e}");
+                        }
+                    });
+                }
+                _ => {}
             }
-        });
+        }
     }
 
     Ok(())
