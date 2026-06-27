@@ -1,8 +1,9 @@
 mod http;
 
 use http::{Verb, parse_request};
-use std::io::Error;
-use std::os::fd::AsRawFd;
+use std::collections::HashMap;
+use std::io::{Error, Read};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::{
     net::{TcpListener, TcpStream},
     time::Duration,
@@ -10,6 +11,7 @@ use std::{
 
 static MAX_EVENTS: usize = 1024;
 
+//TODO: Refactor into parse_header that does not own the stream or the arenas
 fn handle_connection(mut stream: TcpStream) -> std::io::Result<()> {
     let mut headers_buf = Vec::new();
     let mut body_start = Vec::new();
@@ -44,6 +46,11 @@ fn handle_connection(mut stream: TcpStream) -> std::io::Result<()> {
     Ok(())
 }
 
+struct PendingReq {
+    stream: TcpStream,
+    buffer: Vec<u8>,
+}
+
 fn main() -> std::io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:9100")?;
     listener.set_nonblocking(true)?;
@@ -67,7 +74,7 @@ fn main() -> std::io::Result<()> {
         )
     };
     let mut events: Vec<libc::epoll_event> = Vec::with_capacity(MAX_EVENTS);
-
+    let mut requests: HashMap<u64, PendingReq> = HashMap::new();
     loop {
         events.clear();
         let res = unsafe {
@@ -89,13 +96,55 @@ fn main() -> std::io::Result<()> {
             let key = event.u64;
             if key == listener_fd as u64 {
                 let (stream, _) = listener.accept()?;
-                stream.set_read_timeout(Some(Duration::new(30, 0)))?;
+                let stream_fd = stream.as_raw_fd();
 
-                std::thread::spawn(move || {
-                    if let Err(e) = handle_connection(stream) {
-                        eprintln!("Connection error: {e}");
+                let mut stream_ready_ev = libc::epoll_event {
+                    events: (libc::EPOLLIN) as u32,
+                    u64: stream_fd as u64,
+                };
+
+                let res = unsafe {
+                    libc::epoll_ctl(
+                        epoll_fd,
+                        libc::EPOLL_CTL_ADD,
+                        stream_fd,
+                        &mut stream_ready_ev,
+                    )
+                };
+
+                if res == -1 {
+                    continue;
+                }
+
+                let req = PendingReq {
+                    stream,
+                    buffer: Vec::new(),
+                };
+
+                req.stream.set_nonblocking(true)?;
+
+                requests.insert(stream_fd as u64, req);
+
+                // std::thread::spawn(move || {
+                //     if let Err(e) = handle_connection(stream) {
+                //         eprintln!("Connection error: {e}");
+                //     }
+                // });
+            } else {
+                let req = requests.get_mut(&key).unwrap();
+                let mut buf = [0; 4096];
+                let read = req.stream.read(&mut buf);
+                if let Ok(read) = read {
+                    if read == 0 {
+                        requests.remove(&key);
+                        continue;
                     }
-                });
+
+                    req.buffer.extend_from_slice(&buf[0..read]);
+                    if let Some(pos) = req.buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+                        // TODO: parse the headers
+                    }
+                }
             }
         }
     }
