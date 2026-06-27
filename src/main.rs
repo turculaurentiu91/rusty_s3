@@ -53,7 +53,7 @@ fn main() -> std::io::Result<()> {
 
     let mut conn_ready_ev = libc::epoll_event {
         events: (libc::EPOLLIN) as u32,
-        u64: 100,
+        u64: listener_fd as u64,
     };
 
     unsafe {
@@ -84,18 +84,16 @@ fn main() -> std::io::Result<()> {
         unsafe { events.set_len(res as usize) };
 
         for event in &events {
-            match (event.u64) {
-                100 => {
-                    let (stream, _) = listener.accept()?;
-                    stream.set_read_timeout(Some(Duration::new(30, 0)))?;
+            let key = event.u64;
+            if key == listener_fd as u64 {
+                let (stream, _) = listener.accept()?;
+                stream.set_read_timeout(Some(Duration::new(30, 0)))?;
 
-                    std::thread::spawn(move || {
-                        if let Err(e) = handle_connection(stream) {
-                            eprintln!("Connection error: {e}");
-                        }
-                    });
-                }
-                _ => {}
+                std::thread::spawn(move || {
+                    if let Err(e) = handle_connection(stream) {
+                        eprintln!("Connection error: {e}");
+                    }
+                });
             }
         }
     }
