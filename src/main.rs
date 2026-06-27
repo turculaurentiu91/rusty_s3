@@ -8,6 +8,8 @@ use std::{
     time::Duration,
 };
 
+static MAX_EVENTS: usize = 1024;
+
 fn handle_connection(mut stream: TcpStream) -> std::io::Result<()> {
     let mut headers_buf = Vec::new();
     let mut body_start = Vec::new();
@@ -64,7 +66,7 @@ fn main() -> std::io::Result<()> {
             &mut conn_ready_ev,
         )
     };
-    let mut events: Vec<libc::epoll_event> = Vec::with_capacity(1024);
+    let mut events: Vec<libc::epoll_event> = Vec::with_capacity(MAX_EVENTS);
 
     loop {
         events.clear();
@@ -72,7 +74,7 @@ fn main() -> std::io::Result<()> {
             libc::epoll_wait(
                 epoll_fd,
                 events.as_mut_ptr() as *mut libc::epoll_event,
-                1024,
+                MAX_EVENTS as libc::c_int,
                 -1,
             )
         };
