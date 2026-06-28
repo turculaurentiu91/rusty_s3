@@ -103,6 +103,7 @@ fn process_query_params(req: &mut Vec<u8>) -> Vec<((usize, usize), (usize, usize
 }
 
 pub fn parse_request<'a>(headers_buf: &'a mut Vec<u8>) -> Option<std::io::Result<Request<'a>>> {
+    //TODO: add a cursor to optimise reading, for body pos or potentially for whole function
     let body_start_pos = match headers_buf.windows(4).position(|w| w == b"\r\n\r\n") {
         None => return None,
         Some(pos) => pos,
