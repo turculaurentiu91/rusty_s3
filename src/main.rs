@@ -139,7 +139,7 @@ fn main() -> std::io::Result<()> {
                     }
                 }
 
-                if let Some(Ok(request)) = parse_request(&mut req_state.buffer) {
+                if let Some(Ok(request)) = parse_request(&req_state.buffer) {
                     handle_connection(request)?;
                 }
             }
