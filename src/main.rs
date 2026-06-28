@@ -1,24 +1,19 @@
 mod http;
 
+use crate::http::Request;
 use http::{Verb, parse_request};
 use std::collections::HashMap;
-use std::io::{Error, Read};
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
+use std::io::Read;
+use std::os::fd::AsRawFd;
 use std::{
     io,
     net::{TcpListener, TcpStream},
-    time::Duration,
 };
 
 static MAX_EVENTS: usize = 1024;
 
-//TODO: Refactor into parse_header that does not own the stream or the arenas
-fn handle_connection(mut stream: TcpStream) -> std::io::Result<()> {
-    let mut headers_buf = Vec::new();
-    let mut body_start = Vec::new();
-
-    let request = parse_request(&mut stream, &mut headers_buf, &mut body_start)?;
-
+//TODO: Refactor into partial processing/async with a way to read the body
+fn handle_connection(request: Request) -> std::io::Result<()> {
     let path_segments = request.path.trim_start_matches('/');
     let path_segments = path_segments
         .split_once('/')
@@ -125,22 +120,16 @@ fn main() -> std::io::Result<()> {
                 req.stream.set_nonblocking(true)?;
 
                 requests.insert(stream_fd as u64, req);
-
-                // std::thread::spawn(move || {
-                //     if let Err(e) = handle_connection(stream) {
-                //         eprintln!("Connection error: {e}");
-                //     }
-                // });
             } else {
-                let req = requests.get_mut(&key).unwrap();
+                let req_state = requests.get_mut(&key).unwrap();
                 let mut buf = [0; 4096];
                 loop {
-                    match req.stream.read(&mut buf) {
+                    match req_state.stream.read(&mut buf) {
                         Ok(0) => {
                             requests.remove(&key);
                             continue 'eventsLoop;
                         }
-                        Ok(n) => req.buffer.extend_from_slice(&buf[0..n]),
+                        Ok(n) => req_state.buffer.extend_from_slice(&buf[0..n]),
                         Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                         Err(e) => {
                             eprintln!("Socket error: {}", e);
@@ -150,8 +139,8 @@ fn main() -> std::io::Result<()> {
                     }
                 }
 
-                if let Some(pos) = req.buffer.windows(4).position(|w| w == b"\r\n\r\n") {
-                    // TODO: parse the headers
+                if let Some(Ok(request)) = parse_request(&mut req_state.buffer) {
+                    handle_connection(request)?;
                 }
             }
         }
