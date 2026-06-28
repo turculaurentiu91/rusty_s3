@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::io::{Error, Read};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::{
+    io,
     net::{TcpListener, TcpStream},
     time::Duration,
 };
@@ -92,7 +93,7 @@ fn main() -> std::io::Result<()> {
 
         unsafe { events.set_len(res as usize) };
 
-        for event in &events {
+        'eventsLoop: for event in &events {
             let key = event.u64;
             if key == listener_fd as u64 {
                 let (stream, _) = listener.accept()?;
@@ -133,17 +134,24 @@ fn main() -> std::io::Result<()> {
             } else {
                 let req = requests.get_mut(&key).unwrap();
                 let mut buf = [0; 4096];
-                let read = req.stream.read(&mut buf);
-                if let Ok(read) = read {
-                    if read == 0 {
-                        requests.remove(&key);
-                        continue;
+                loop {
+                    match req.stream.read(&mut buf) {
+                        Ok(0) => {
+                            requests.remove(&key);
+                            continue 'eventsLoop;
+                        }
+                        Ok(n) => req.buffer.extend_from_slice(&buf[0..n]),
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                        Err(e) => {
+                            eprintln!("Socket error: {}", e);
+                            requests.remove(&key);
+                            continue 'eventsLoop;
+                        }
                     }
+                }
 
-                    req.buffer.extend_from_slice(&buf[0..read]);
-                    if let Some(pos) = req.buffer.windows(4).position(|w| w == b"\r\n\r\n") {
-                        // TODO: parse the headers
-                    }
+                if let Some(pos) = req.buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+                    // TODO: parse the headers
                 }
             }
         }
